@@ -263,14 +263,17 @@ def main():
         filtered = filter_rows(body, headers)
         add_prezzo_scontato(headers, filtered)
 
-        out_io = io.StringIO()
-        writer = csv.writer(out_io, dialect=dialect)
-        writer.writerow(headers)
-        writer.writerows(filtered)
-        out_bytes = out_io.getvalue().encode("utf-8")
+out_io = io.StringIO()
+writer = csv.writer(out_io, dialect=dialect)
+writer.writerow(headers)
+writer.writerows(filtered)
+out_bytes = out_io.getvalue().encode("utf-8")
 
-        upload_bytes(ftp, FTP_OUTPUT_DIR, OUTPUT_FILENAME, out_bytes)
-        print(f"[OK] File creato e caricato: {FTP_OUTPUT_DIR}/{OUTPUT_FILENAME}")
+# Nome fisso senza timestamp
+out_name = OUTPUT_FILENAME  # es. LISTINI_LISTINO_VENDITA_6.csv
+upload_bytes(ftp, FTP_OUTPUT_DIR, out_name, out_bytes)
+print(f"[OK] File creato e caricato: {FTP_OUTPUT_DIR}/{out_name}")
+
     finally:
         try:
             ftp.quit()
