@@ -205,8 +205,9 @@ def _to_number(value):
         return None
 
 
+# Calcola la nuova colonna
 try:
-    # Trova le colonne dagli header, case-insensitive
+    # Trova indici colonne per nome (case-insensitive)
     def find_col(name):
         name = name.strip().lower()
         for i, h in enumerate(headers):
@@ -223,24 +224,28 @@ try:
         headers.append("PREZZO_SCONTATO")
         count = 0
         for r in filtered:
+            # Protezione per righe corte
             if len(r) <= max(idx_prezzo, idx_sconto):
-                # Se la riga è corta, aggiungiamo una cella vuota
                 r.append("")
                 continue
+
             prezzo = _to_number(r[idx_prezzo])
             sconto = _to_number(r[idx_sconto])
+
             if prezzo is None:
-                r.append("")  # nessun prezzo → cella vuota
+                r.append("")  # nessun prezzo
                 continue
+
             if sconto is None or sconto == 0:
-                # se sconto mancante o 0 → prezzo pieno
                 prezzo_scontato = prezzo
             else:
                 prezzo_scontato = prezzo * (1 - (sconto / 100.0))
-            # Aggiunge valore formattato
+
             r.append(f"{prezzo_scontato:.2f}".replace(".", ","))
             count += 1
+
         print(f"[INFO] Aggiunta colonna PREZZO_SCONTATO ({count} righe elaborate).")
+
 except Exception as e:
     print(f"[WARN] Errore nel calcolo PREZZO_SCONTATO: {e}")
 
