@@ -4,23 +4,27 @@ import csv
 import datetime
 from ftplib import FTP, FTP_TLS, error_perm
 
-# === CONFIG ENV ===
+# =========================
+# Config da variabili d'ambiente
+# =========================
 FTP_HOST = os.getenv("FTP_HOST")
 FTP_USER = os.getenv("FTP_USER")
 FTP_PASS = os.getenv("FTP_PASS")
 FTP_PORT = int(os.getenv("FTP_PORT", "21"))
-FTP_SECURE = os.getenv("FTP_SECURE", "true").lower() == "true"
-FTP_INPUT_PATH = os.getenv("FTP_INPUT_PATH")
+FTP_SECURE = os.getenv("FTP_SECURE", "true").strip().lower() == "true"
+
+FTP_INPUT_PATH = os.getenv("FTP_INPUT_PATH")  # es: /public_html/IMPORT_DATI_FULL_20230919_0940/LISTINI.CSV
 FTP_OUTPUT_DIR = os.getenv("FTP_OUTPUT_DIR", "/")
+
 FILTER_MATCH = os.getenv("FILTER_MATCH", "LISTINO VENDITA 6")
 FILTER_MODE = os.getenv("FILTER_MODE", "any")   # 'any' | 'column'
 FILTER_COLUMN = os.getenv("FILTER_COLUMN", "")
 
-# === UTILS ===
+# =========================
+# Connessione FTP/FTPS
+# =========================
 def _connect():
-    """
-    Prova FTPS (explicit). Se fallisce, fallback a FTP semplice.
-    """
+    """Prova FTPS (explicit). Se fallisce, fallback a FTP semplice."""
     if FTP_SECURE:
         try:
             ftps = FTP_TLS()
@@ -33,7 +37,6 @@ def _connect():
             return ftps
         except Exception as e:
             print(f"[WARN] FTPS fallito: {e}. Fallback a FTP semplice...")
-    # FTP
     ftp = FTP()
     ftp.connect(FTP_HOST, FTP_PORT, timeout=60)
     ftp.login(FTP_USER, FTP_PASS)
@@ -41,6 +44,9 @@ def _connect():
     print("[INFO] Connesso via FTP.")
     return ftp
 
+# =========================
+# Utility path e I/O
+# =========================
 def _split_dir_and_file(path: str):
     path = (path or "").replace("\\", "/")
     parts = path.rsplit("/", 1)
@@ -78,26 +84,41 @@ def _download_file(ftp, remote_path: str) -> bytes:
     buf.seek(0)
     return buf.read()
 
-def _guess_dialect(sample: bytes):
+def _upload_bytes(ftp, remote_dir: str, filename: str, data: bytes):
+    _cd(ftp, remote_dir)
+    bio = io.BytesIO(data)
+    ftp.storbinary(f"STOR {filename}", bio)
+
+# =========================
+# CSV helpers
+# =========================
+def _guess_csv(sample: bytes):
+    """
+    Ritorna (dialect_or_none, fmtparams_dict, has_header_bool).
+    Se lo sniff fallisce, usa fallback delimiter=';'.
+    """
     try:
         sample_txt = sample.decode("utf-8", errors="replace")
-        dialect = csv.Sniffer().sniff(sample_txt[:4096], delimiters=[",", ";", "\t", "|", ":"])
-        has_header = csv.Sniffer().has_header(sample_txt[:4096])
-        return dialect, has_header
+        sniffer = csv.Sniffer()
+        dialect = sniffer.sniff(sample_txt[:4096], delimiters=[",", ";", "\t", "|", ":"])
+        has_header = sniffer.has_header(sample_txt[:4096])
+        return dialect, {}, has_header
     except Exception:
-        class _Fallback(csv.Dialect):
-            delimiter = ";"
-            quotechar = '"'
-            escapechar = None
-            doublequote = True
-            skipinitialspace = False
-            lineterminator = "\n"
-            quoting = csv.QUOTE_MINIMAL
-        return _Fallback(), True
+        # fallback
+        fmt = {
+            "delimiter": ";",
+            "quotechar": '"',
+            "doublequote": True,
+            "skipinitialspace": False,
+            "lineterminator": "\n",
+            "quoting": csv.QUOTE_MINIMAL,
+        }
+        return None, fmt, True
 
 def _filter_rows(rows, headers):
+    """Filtra le righe in base a FILTER_*."""
     filtered = []
-    if FILTER_MODE == "column":
+    if FILTER_MODE == "column" and FILTER_COLUMN:
         if FILTER_COLUMN not in headers:
             print(f"[WARN] Colonna '{FILTER_COLUMN}' non trovata. Nessun filtro applicato.")
             return []
@@ -114,12 +135,9 @@ def _filter_rows(rows, headers):
                 filtered.append(r)
     return filtered
 
-def _upload_bytes(ftp, remote_dir: str, filename: str, data: bytes):
-    _cd(ftp, remote_dir)
-    bio = io.BytesIO(data)
-    ftp.storbinary(f"STOR {filename}", bio)
-
-# ---- Helpers numerici per prezzo/sconto ----
+# =========================
+# Calcolo PREZZO_SCONTATO
+# =========================
 def _to_number(value):
     """Converte stringhe tipo '1.234,56 €' in float; None se non convertibile."""
     if value is None:
@@ -139,10 +157,11 @@ def _to_number(value):
     except ValueError:
         return None
 
-def _add_prezzo_scontato(headers, filtered):
+def _add_prezzo_scontato(headers, rows):
     """
     Aggiunge la colonna PREZZO_SCONTATO calcolata da:
     LIPREZZO * (1 - LISCONT1/100). Se LISCONT1 è 0 o vuoto -> LIPREZZO.
+    Opera su 'rows' (lista di liste), modifica in-place.
     """
     # trova colonne per nome, case-insensitive
     def find_col(name):
@@ -159,14 +178,17 @@ def _add_prezzo_scontato(headers, filtered):
         print("[WARN] Colonne 'LIPREZZO' o 'LISCONT1' non trovate negli header. Nessuna colonna PREZZO_SCONTATO aggiunta.")
         return
 
-    # aggiungi header nuova colonna
-    headers.append("PREZZO_SCONTATO")
+    # evita duplicati header se già esistente
+    if "PREZZO_SCONTATO" not in [str(h).strip() for h in headers]:
+        headers.append("PREZZO_SCONTATO")
+
     count = 0
-    for r in filtered:
-        # Se la riga è corta, aggiungi vuoto
+    for r in rows:
+        # protezione per righe troppo corte
         if len(r) <= max(idx_prezzo, idx_sconto):
             r.append("")
             continue
+
         prezzo = _to_number(r[idx_prezzo])
         sconto = _to_number(r[idx_sconto])
 
@@ -179,27 +201,28 @@ def _add_prezzo_scontato(headers, filtered):
         else:
             prezzo_scontato = prezzo * (1.0 - (sconto / 100.0))
 
-        # Formato 2 decimali, stile EU con virgola
+        # formato EU: virgola decimale
         r.append(f"{prezzo_scontato:.2f}".replace(".", ","))
         count += 1
 
     print(f"[INFO] Aggiunta colonna PREZZO_SCONTATO ({count} righe elaborate).")
 
-# CHIUSURA DI UN try: RIMASTO APERTO PER ERRORE
-except Exception:
-    pass
-
-# === MAIN ===
+# =========================
+# Main
+# =========================
 def main():
     if not (FTP_HOST and FTP_USER and FTP_PASS and FTP_INPUT_PATH):
         raise SystemExit("[ERROR] Manca una o più variabili d'ambiente: FTP_HOST, FTP_USER, FTP_PASS, FTP_INPUT_PATH.")
 
     ftp = _connect()
     try:
+        # Scarica file
         raw = _download_file(ftp, FTP_INPUT_PATH)
-        dialect, has_header = _guess_dialect(raw)
 
-        # decode robusto
+        # Sniff CSV
+        dialect, fmtparams, has_header = _guess_csv(raw)
+
+        # Decode robusto
         text = None
         for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
             try:
@@ -210,39 +233,49 @@ def main():
         if text is None:
             text = raw.decode("latin-1", errors="replace")
 
-        reader = csv.reader(io.StringIO(text), dialect=dialect)
-        rows = list(reader)
-        if not rows:
+        # Leggi CSV
+        sio = io.StringIO(text)
+        if dialect is not None:
+            reader = csv.reader(sio, dialect=dialect)
+        else:
+            reader = csv.reader(sio, **fmtparams)
+
+        rows_all = list(reader)
+        if not rows_all:
             raise SystemExit("[ERROR] Il file CSV è vuoto.")
 
         # Header / corpo
         if has_header:
-            headers = rows[0]
-            body = rows[1:]
+            headers = rows_all[0]
+            body = rows_all[1:]
         else:
-            width = max(len(r) for r in rows)
+            width = max(len(r) for r in rows_all)
             headers = [f"col_{i+1}" for i in range(width)]
-            body = rows
+            body = rows_all
 
-        # Filtra solo LISTINO VENDITA 6
+        # Filtra solo le righe del listino richiesto
         filtered = _filter_rows(body, headers)
 
-        # === AGGIUNTA COLONNA PREZZO_SCONTATO ===
+        # Aggiungi colonna PREZZO_SCONTATO
         _add_prezzo_scontato(headers, filtered)
 
-        # Scrivi output
+        # Scrivi output CSV
         out_io = io.StringIO()
-        writer = csv.writer(out_io, dialect=dialect)
+        if dialect is not None:
+            writer = csv.writer(out_io, dialect=dialect)
+        else:
+            writer = csv.writer(out_io, **fmtparams)
         writer.writerow(headers)
         writer.writerows(filtered)
         out_bytes = out_io.getvalue().encode("utf-8")
 
+        # Upload
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         out_name = f"LISTINI_LISTINO_VENDITA_6_{ts}.csv"
         remote_dir = FTP_OUTPUT_DIR if FTP_OUTPUT_DIR else "/"
         _upload_bytes(ftp, remote_dir, out_name, out_bytes)
 
-        print(f"[OK] File caricato: {remote_dir}/{out_name} (righe: {len(filtered)})")
+        print(f"[OK] File caricato: {remote_dir}/{out_name} | Righe filtrate: {len(filtered)}")
     finally:
         try:
             ftp.quit()
