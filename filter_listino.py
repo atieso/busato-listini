@@ -185,6 +185,10 @@ def _add_prezzo_scontato(headers, filtered):
 
     print(f"[INFO] Aggiunta colonna PREZZO_SCONTATO ({count} righe elaborate).")
 
+# CHIUSURA DI UN try: RIMASTO APERTO PER ERRORE
+except Exception:
+    pass
+
 # === MAIN ===
 def main():
     if not (FTP_HOST and FTP_USER and FTP_PASS and FTP_INPUT_PATH):
