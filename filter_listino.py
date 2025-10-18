@@ -1,7 +1,6 @@
 import os
 import io
 import csv
-import datetime
 from ftplib import FTP, FTP_TLS, error_perm
 
 # =========================
@@ -18,7 +17,10 @@ FTP_OUTPUT_DIR = os.getenv("FTP_OUTPUT_DIR", "/")
 
 FILTER_MATCH = os.getenv("FILTER_MATCH", "LISTINO VENDITA 6")
 FILTER_MODE = os.getenv("FILTER_MODE", "any")   # 'any' | 'column'
-FILTER_COLUMN = os.getenv("FILTER_COLUMN", "")
+FILTER_COLUMN = os.getenv("FILTER_COLUMN", "")  # usato solo se FILTER_MODE='column'
+
+# Nome fisso del file di output (sovrascritto ogni volta)
+OUTPUT_FILENAME = os.getenv("OUTPUT_FILENAME", "LISTINI_LISTINO_VENDITA_6.csv")
 
 # =========================
 # Connessione FTP/FTPS
@@ -45,7 +47,7 @@ def connect_ftp():
     return ftp
 
 # =========================
-# Utility
+# Utility FTP
 # =========================
 def split_dir_and_file(path: str):
     path = path.replace("\\", "/")
@@ -90,6 +92,7 @@ def upload_bytes(ftp, remote_dir: str, filename: str, data: bytes):
 # CSV helpers
 # =========================
 def guess_csv(sample: bytes):
+    """Ritorna (dialect, has_header). Fallback delimiter=';'."""
     try:
         text = sample.decode("utf-8", errors="replace")
         sniffer = csv.Sniffer()
@@ -108,6 +111,7 @@ def guess_csv(sample: bytes):
         return Simple(), True
 
 def filter_rows(rows, headers):
+    """Filtra le righe in base a FILTER_*."""
     filtered = []
     if FILTER_MODE == "column" and FILTER_COLUMN in headers:
         idx = headers.index(FILTER_COLUMN)
@@ -121,23 +125,80 @@ def filter_rows(rows, headers):
     return filtered
 
 # =========================
-# Calcolo PREZZO_SCONTATO
+# Parser numerico robusto
 # =========================
 def to_number(val):
+    """
+    Converte stringhe monetarie in float senza errori di x100.
+
+    Regole:
+    - Se presenti sia ',' che '.', il separatore decimale è quello più a destra.
+      (EU: '2.530,00' -> 2530.00 ; US: '2,530.00' -> 2530.00)
+    - Se presente solo ',':
+        * se la parte dopo la virgola ha 3/6/9 cifre -> ',' è migliaia (es. '2,530' -> 2530)
+        * altrimenti è decimale (es. '2,53000' -> 2.53)
+    - Se presente solo '.':
+        * se la parte dopo il punto ha 3/6/9 cifre -> '.' è migliaia (es. '2.530' -> 2530)
+        * altrimenti è decimale (es. '2.53000' -> 2.53)
+    Supporta anche simboli €, spazi e negativi tra parentesi.
+    """
     if val is None:
         return None
-    s = str(val).strip().replace("€", "").replace(" ", "").replace("\u00A0", "")
+    s = str(val).strip()
     if not s:
         return None
-    if "," in s and "." in s:
-        s = s.replace(".", "").replace(",", ".")
-    else:
-        s = s.replace(",", ".")
+
+    # negativi tra parentesi o con trattino
+    neg = False
+    if s.startswith("(") and s.endswith(")"):
+        neg = True
+        s = s[1:-1].strip()
+    if s.startswith("-"):
+        neg = True
+        s = s[1:].strip()
+
+    # rimuovi simboli non numerici comuni
+    for ch in ["€", " ", "\u00A0"]:
+        s = s.replace(ch, "")
+
+    has_comma = "," in s
+    has_dot = "." in s
+
+    def is_thousands_tail(tail):
+        # 3/6/9 cifre → probabile raggruppamento migliaia
+        return len(tail) in (3, 6, 9) and tail.isdigit()
+
+    if has_comma and has_dot:
+        # separatore decimale = quello più a destra
+        if s.rfind(",") > s.rfind("."):
+            # stile EU: '.' migliaia, ',' decimale
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            # stile US: ',' migliaia, '.' decimale
+            s = s.replace(",", "")
+    elif has_comma:
+        tail = s.split(",")[-1]
+        if is_thousands_tail(tail) and s.count(",") >= 1:
+            s = s.replace(",", "")  # virgola migliaia
+        else:
+            s = s.replace(",", ".") # virgola decimale
+    elif has_dot:
+        tail = s.split(".")[-1]
+        if is_thousands_tail(tail) and s.count(".") >= 1:
+            s = s.replace(".", "")  # punto migliaia
+        # altrimenti: punto come decimale → lascia così
+
     try:
-        return float(s)
+        num = float(s)
+        if neg:
+            num = -num
+        return num
     except ValueError:
         return None
 
+# =========================
+# Calcolo PREZZO_SCONTATO
+# =========================
 def add_prezzo_scontato(headers, rows):
     def find_col(name):
         name = name.lower()
@@ -153,7 +214,9 @@ def add_prezzo_scontato(headers, rows):
         print("[WARN] Colonne LIPREZZO/LISCONT1 non trovate. Nessun calcolo.")
         return
 
-    headers.append("PREZZO_SCONTATO")
+    if "PREZZO_SCONTATO" not in [str(h).strip() for h in headers]:
+        headers.append("PREZZO_SCONTATO")
+
     count = 0
     for r in rows:
         if len(r) <= max(idx_prezzo, idx_sconto):
@@ -167,9 +230,11 @@ def add_prezzo_scontato(headers, rows):
         if sconto is None or sconto == 0:
             prezzo_scontato = prezzo
         else:
-            prezzo_scontato = prezzo * (1 - sconto / 100)
+            prezzo_scontato = prezzo * (1 - sconto / 100.0)
+        # formato EU: virgola decimale
         r.append(f"{prezzo_scontato:.2f}".replace(".", ","))
         count += 1
+
     print(f"[INFO] Aggiunta colonna PREZZO_SCONTATO ({count} righe elaborate).")
 
 # =========================
@@ -204,10 +269,8 @@ def main():
         writer.writerows(filtered)
         out_bytes = out_io.getvalue().encode("utf-8")
 
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_name = f"LISTINI_LISTINO_VENDITA_6_{ts}.csv"
-        upload_bytes(ftp, FTP_OUTPUT_DIR, out_name, out_bytes)
-        print(f"[OK] File creato e caricato: {FTP_OUTPUT_DIR}/{out_name}")
+        upload_bytes(ftp, FTP_OUTPUT_DIR, OUTPUT_FILENAME, out_bytes)
+        print(f"[OK] File creato e caricato: {FTP_OUTPUT_DIR}/{OUTPUT_FILENAME}")
     finally:
         try:
             ftp.quit()
