@@ -12,14 +12,12 @@ FTP_PASS = os.getenv("FTP_PASS")
 FTP_PORT = int(os.getenv("FTP_PORT", "21"))
 FTP_SECURE = os.getenv("FTP_SECURE", "true").lower() == "true"
 
-FTP_INPUT_PATH = os.getenv("FTP_INPUT_PATH")
-FTP_OUTPUT_DIR = os.getenv("FTP_OUTPUT_DIR", "/")
-
+FTP_INPUT_PATH = os.getenv("FTP_INPUT_PATH")  # es. /public_html/IMPORT_DATI_FULL_20230919_0940/LISTINI.CSV
 FILTER_MATCH = os.getenv("FILTER_MATCH", "LISTINO VENDITA 6")
 FILTER_MODE = os.getenv("FILTER_MODE", "any")   # 'any' | 'column'
-FILTER_COLUMN = os.getenv("FILTER_COLUMN", "")  # usato solo se FILTER_MODE='column'
+FILTER_COLUMN = os.getenv("FILTER_COLUMN", "")
 
-# Nome fisso del file di output (sovrascritto ogni volta)
+# Nome fisso del file di output (senza timestamp)
 OUTPUT_FILENAME = os.getenv("OUTPUT_FILENAME", "LISTINI_LISTINO_VENDITA_6.csv")
 
 # =========================
@@ -82,7 +80,7 @@ def download_file(ftp, remote_path: str) -> bytes:
     buf = io.BytesIO()
     ftp.retrbinary(f"RETR {filename}", buf.write)
     buf.seek(0)
-    return buf.read()
+    return buf.read(), directory
 
 def upload_bytes(ftp, remote_dir: str, filename: str, data: bytes):
     cd(ftp, remote_dir)
@@ -130,17 +128,7 @@ def filter_rows(rows, headers):
 def to_number(val):
     """
     Converte stringhe monetarie in float senza errori di x100.
-
-    Regole:
-    - Se presenti sia ',' che '.', il separatore decimale è quello più a destra.
-      (EU: '2.530,00' -> 2530.00 ; US: '2,530.00' -> 2530.00)
-    - Se presente solo ',':
-        * se la parte dopo la virgola ha 3/6/9 cifre -> ',' è migliaia (es. '2,530' -> 2530)
-        * altrimenti è decimale (es. '2,53000' -> 2.53)
-    - Se presente solo '.':
-        * se la parte dopo il punto ha 3/6/9 cifre -> '.' è migliaia (es. '2.530' -> 2530)
-        * altrimenti è decimale (es. '2.53000' -> 2.53)
-    Supporta anche simboli €, spazi e negativi tra parentesi.
+    Gestisce 2,53000 / 2.530,00 / 2,530 ecc.
     """
     if val is None:
         return None
@@ -157,7 +145,6 @@ def to_number(val):
         neg = True
         s = s[1:].strip()
 
-    # rimuovi simboli non numerici comuni
     for ch in ["€", " ", "\u00A0"]:
         s = s.replace(ch, "")
 
@@ -165,28 +152,23 @@ def to_number(val):
     has_dot = "." in s
 
     def is_thousands_tail(tail):
-        # 3/6/9 cifre → probabile raggruppamento migliaia
         return len(tail) in (3, 6, 9) and tail.isdigit()
 
     if has_comma and has_dot:
-        # separatore decimale = quello più a destra
         if s.rfind(",") > s.rfind("."):
-            # stile EU: '.' migliaia, ',' decimale
-            s = s.replace(".", "").replace(",", ".")
+            s = s.replace(".", "").replace(",", ".")  # stile EU
         else:
-            # stile US: ',' migliaia, '.' decimale
-            s = s.replace(",", "")
+            s = s.replace(",", "")  # stile US
     elif has_comma:
         tail = s.split(",")[-1]
-        if is_thousands_tail(tail) and s.count(",") >= 1:
-            s = s.replace(",", "")  # virgola migliaia
+        if is_thousands_tail(tail):
+            s = s.replace(",", "")
         else:
-            s = s.replace(",", ".") # virgola decimale
+            s = s.replace(",", ".")
     elif has_dot:
         tail = s.split(".")[-1]
-        if is_thousands_tail(tail) and s.count(".") >= 1:
-            s = s.replace(".", "")  # punto migliaia
-        # altrimenti: punto come decimale → lascia così
+        if is_thousands_tail(tail):
+            s = s.replace(".", "")
 
     try:
         num = float(s)
@@ -231,7 +213,6 @@ def add_prezzo_scontato(headers, rows):
             prezzo_scontato = prezzo
         else:
             prezzo_scontato = prezzo * (1 - sconto / 100.0)
-        # formato EU: virgola decimale
         r.append(f"{prezzo_scontato:.2f}".replace(".", ","))
         count += 1
 
@@ -247,7 +228,7 @@ def main():
 
     ftp = connect_ftp()
     try:
-        raw = download_file(ftp, FTP_INPUT_PATH)
+        raw, input_dir = download_file(ftp, FTP_INPUT_PATH)
         dialect, has_header = guess_csv(raw)
 
         text = raw.decode("utf-8", errors="replace")
@@ -263,17 +244,15 @@ def main():
         filtered = filter_rows(body, headers)
         add_prezzo_scontato(headers, filtered)
 
-out_io = io.StringIO()
-writer = csv.writer(out_io, dialect=dialect)
-writer.writerow(headers)
-writer.writerows(filtered)
-out_bytes = out_io.getvalue().encode("utf-8")
+        out_io = io.StringIO()
+        writer = csv.writer(out_io, dialect=dialect)
+        writer.writerow(headers)
+        writer.writerows(filtered)
+        out_bytes = out_io.getvalue().encode("utf-8")
 
-# Nome fisso senza timestamp
-out_name = OUTPUT_FILENAME  # es. LISTINI_LISTINO_VENDITA_6.csv
-upload_bytes(ftp, FTP_OUTPUT_DIR, out_name, out_bytes)
-print(f"[OK] File creato e caricato: {FTP_OUTPUT_DIR}/{out_name}")
-
+        # Salva nella stessa cartella dell’input
+        upload_bytes(ftp, input_dir, OUTPUT_FILENAME, out_bytes)
+        print(f"[OK] File creato e caricato: {input_dir}/{OUTPUT_FILENAME}")
     finally:
         try:
             ftp.quit()
