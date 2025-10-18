@@ -11,20 +11,16 @@ FTP_USER = os.getenv("FTP_USER")
 FTP_PASS = os.getenv("FTP_PASS")
 FTP_PORT = int(os.getenv("FTP_PORT", "21"))
 FTP_SECURE = os.getenv("FTP_SECURE", "true").lower() == "true"
-
-FTP_INPUT_PATH = os.getenv("FTP_INPUT_PATH")  # es. /public_html/IMPORT_DATI_FULL_20230919_0940/LISTINI.CSV
+FTP_INPUT_PATH = os.getenv("FTP_INPUT_PATH")
 FILTER_MATCH = os.getenv("FILTER_MATCH", "LISTINO VENDITA 6")
-FILTER_MODE = os.getenv("FILTER_MODE", "any")   # 'any' | 'column'
+FILTER_MODE = os.getenv("FILTER_MODE", "any")
 FILTER_COLUMN = os.getenv("FILTER_COLUMN", "")
-
-# Nome fisso del file di output (senza timestamp)
 OUTPUT_FILENAME = os.getenv("OUTPUT_FILENAME", "LISTINI_LISTINO_VENDITA_6.csv")
 
 # =========================
-# Connessione FTP/FTPS
+# Connessione FTP
 # =========================
 def connect_ftp():
-    """Prova FTPS, se fallisce usa FTP semplice."""
     if FTP_SECURE:
         try:
             ftps = FTP_TLS()
@@ -47,21 +43,19 @@ def connect_ftp():
 # =========================
 # Utility FTP
 # =========================
-def split_dir_and_file(path: str):
+def split_dir_and_file(path):
     path = path.replace("\\", "/")
     parts = path.rsplit("/", 1)
     if len(parts) == 1:
         return "/", parts[0]
     return parts[0] or "/", parts[1]
 
-def cd(ftp, path: str):
+def cd(ftp, path):
     if not path or path == "/":
         ftp.cwd("/")
         return
     path = path.strip("/")
-    if not path:
-        ftp.cwd("/")
-        return
+    ftp.cwd("/")
     for seg in path.split("/"):
         if not seg:
             continue
@@ -74,7 +68,7 @@ def cd(ftp, path: str):
                 pass
             ftp.cwd(seg)
 
-def download_file(ftp, remote_path: str) -> bytes:
+def download_file(ftp, remote_path):
     directory, filename = split_dir_and_file(remote_path)
     cd(ftp, directory)
     buf = io.BytesIO()
@@ -82,15 +76,14 @@ def download_file(ftp, remote_path: str) -> bytes:
     buf.seek(0)
     return buf.read(), directory
 
-def upload_bytes(ftp, remote_dir: str, filename: str, data: bytes):
+def upload_bytes(ftp, remote_dir, filename, data):
     cd(ftp, remote_dir)
     ftp.storbinary(f"STOR {filename}", io.BytesIO(data))
 
 # =========================
 # CSV helpers
 # =========================
-def guess_csv(sample: bytes):
-    """Ritorna (dialect, has_header). Fallback delimiter=';'."""
+def guess_csv(sample):
     try:
         text = sample.decode("utf-8", errors="replace")
         sniffer = csv.Sniffer()
@@ -101,7 +94,6 @@ def guess_csv(sample: bytes):
         class Simple(csv.Dialect):
             delimiter = ";"
             quotechar = '"'
-            escapechar = None
             doublequote = True
             skipinitialspace = False
             lineterminator = "\n"
@@ -109,7 +101,6 @@ def guess_csv(sample: bytes):
         return Simple(), True
 
 def filter_rows(rows, headers):
-    """Filtra le righe in base a FILTER_*."""
     filtered = []
     if FILTER_MODE == "column" and FILTER_COLUMN in headers:
         idx = headers.index(FILTER_COLUMN)
@@ -126,17 +117,11 @@ def filter_rows(rows, headers):
 # Parser numerico robusto
 # =========================
 def to_number(val):
-    """
-    Converte stringhe monetarie in float senza errori di x100.
-    Gestisce 2,53000 / 2.530,00 / 2,530 ecc.
-    """
     if val is None:
         return None
     s = str(val).strip()
     if not s:
         return None
-
-    # negativi tra parentesi o con trattino
     neg = False
     if s.startswith("(") and s.endswith(")"):
         neg = True
@@ -144,21 +129,17 @@ def to_number(val):
     if s.startswith("-"):
         neg = True
         s = s[1:].strip()
-
     for ch in ["€", " ", "\u00A0"]:
         s = s.replace(ch, "")
-
     has_comma = "," in s
     has_dot = "." in s
-
     def is_thousands_tail(tail):
         return len(tail) in (3, 6, 9) and tail.isdigit()
-
     if has_comma and has_dot:
         if s.rfind(",") > s.rfind("."):
-            s = s.replace(".", "").replace(",", ".")  # stile EU
+            s = s.replace(".", "").replace(",", ".")
         else:
-            s = s.replace(",", "")  # stile US
+            s = s.replace(",", "")
     elif has_comma:
         tail = s.split(",")[-1]
         if is_thousands_tail(tail):
@@ -169,7 +150,6 @@ def to_number(val):
         tail = s.split(".")[-1]
         if is_thousands_tail(tail):
             s = s.replace(".", "")
-
     try:
         num = float(s)
         if neg:
@@ -188,17 +168,13 @@ def add_prezzo_scontato(headers, rows):
             if str(h).strip().lower() == name:
                 return i
         return None
-
     idx_prezzo = find_col("liprezzo")
     idx_sconto = find_col("liscont1")
-
     if idx_prezzo is None or idx_sconto is None:
-        print("[WARN] Colonne LIPREZZO/LISCONT1 non trovate. Nessun calcolo.")
+        print("[WARN] Colonne LIPREZZO/LISCONT1 non trovate.")
         return
-
-    if "PREZZO_SCONTATO" not in [str(h).strip() for h in headers]:
+    if "PREZZO_SCONTATO" not in [h.strip().upper() for h in headers]:
         headers.append("PREZZO_SCONTATO")
-
     count = 0
     for r in rows:
         if len(r) <= max(idx_prezzo, idx_sconto):
@@ -212,11 +188,10 @@ def add_prezzo_scontato(headers, rows):
         if sconto is None or sconto == 0:
             prezzo_scontato = prezzo
         else:
-            prezzo_scontato = prezzo * (1 - sconto / 100.0)
+            prezzo_scontato = prezzo * (1 - sconto / 100)
         r.append(f"{prezzo_scontato:.2f}".replace(".", ","))
         count += 1
-
-    print(f"[INFO] Aggiunta colonna PREZZO_SCONTATO ({count} righe elaborate).")
+    print(f"[INFO] PREZZO_SCONTATO calcolato su {count} righe.")
 
 # =========================
 # Main
@@ -225,39 +200,28 @@ def main():
     if not (FTP_HOST and FTP_USER and FTP_PASS and FTP_INPUT_PATH):
         print("[ERRORE] Manca una variabile d'ambiente obbligatoria.")
         return
-
     ftp = connect_ftp()
-    try:
-        raw, input_dir = download_file(ftp, FTP_INPUT_PATH)
-        dialect, has_header = guess_csv(raw)
-
-        text = raw.decode("utf-8", errors="replace")
-        reader = csv.reader(io.StringIO(text), dialect=dialect)
-        rows = list(reader)
-        if not rows:
-            print("[ERRORE] File CSV vuoto.")
-            return
-
-        headers = rows[0] if has_header else [f"col_{i+1}" for i in range(len(rows[0]))]
-        body = rows[1:] if has_header else rows
-
-        filtered = filter_rows(body, headers)
-        add_prezzo_scontato(headers, filtered)
-
-        out_io = io.StringIO()
-        writer = csv.writer(out_io, dialect=dialect)
-        writer.writerow(headers)
-        writer.writerows(filtered)
-        out_bytes = out_io.getvalue().encode("utf-8")
-
-        # Salva nella stessa cartella dell’input
-        upload_bytes(ftp, input_dir, OUTPUT_FILENAME, out_bytes)
-        print(f"[OK] File creato e caricato: {input_dir}/{OUTPUT_FILENAME}")
-    finally:
-        try:
-            ftp.quit()
-        except Exception:
-            pass
+    raw, input_dir = download_file(ftp, FTP_INPUT_PATH)
+    dialect, has_header = guess_csv(raw)
+    text = raw.decode("utf-8", errors="replace")
+    reader = csv.reader(io.StringIO(text), dialect=dialect)
+    rows = list(reader)
+    if not rows:
+        print("[ERRORE] File CSV vuoto.")
+        ftp.quit()
+        return
+    headers = rows[0] if has_header else [f"col_{i+1}" for i in range(len(rows[0]))]
+    body = rows[1:] if has_header else rows
+    filtered = filter_rows(body, headers)
+    add_prezzo_scontato(headers, filtered)
+    out_io = io.StringIO()
+    writer = csv.writer(out_io, dialect=dialect)
+    writer.writerow(headers)
+    writer.writerows(filtered)
+    out_bytes = out_io.getvalue().encode("utf-8")
+    upload_bytes(ftp, input_dir, OUTPUT_FILENAME, out_bytes)
+    print(f"[OK] File caricato in: {input_dir}/{OUTPUT_FILENAME}")
+    ftp.quit()
 
 if __name__ == "__main__":
     main()
