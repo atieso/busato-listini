@@ -183,6 +183,66 @@ def main():
 
         filtered = _filter_rows(body, headers)
 
+
+        # --- CALCOLO PREZZO SCONTATO (LIPREZZO - LISCONT1%) ---
+def _to_number(value):
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    # rimuove simboli valuta e spazi
+    for ch in " €\u00A0":
+        s = s.replace(ch, "")
+    # normalizza virgola/punto
+    if "," in s and "." in s:
+        # se ci sono entrambi, assumiamo formato EU (1.234,56)
+        s = s.replace(".", "").replace(",", ".")
+    else:
+        s = s.replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+try:
+    # trova gli indici delle colonne dagli header
+    # (case-insensitive, tollera spazi)
+    def find_col(name):
+        name = name.strip().lower()
+        for i, h in enumerate(headers):
+            if str(h).strip().lower() == name:
+                return i
+        return None
+
+    idx_prezzo = find_col("liprezzo")
+    idx_sconto = find_col("liscont1")
+
+    if idx_prezzo is None or idx_sconto is None:
+        print("[WARN] Colonne 'LIPREZZO' o 'LISCONT1' non trovate negli header.")
+    else:
+        # aggiungi header nuova colonna
+        headers.append("PREZZO_SCONTATO")
+        for r in filtered:
+            # assicurati che la riga abbia abbastanza colonne
+            if len(r) <= max(idx_prezzo, idx_sconto):
+                r.append("")
+                continue
+            prezzo = _to_number(r[idx_prezzo])
+            sconto = _to_number(r[idx_sconto])
+            if prezzo is None:
+                r.append("")
+                continue
+            if sconto is None:
+                sconto = 0.0
+            prezzo_scontato = prezzo * (1.0 - (sconto / 100.0))
+            # formato 2 decimali, stile europeo (virgola) — se preferisci il punto, togli replace
+            r.append(f"{prezzo_scontato:.2f}".replace(".", ","))
+        print("[INFO] Colonna PREZZO_SCONTATO aggiunta.")
+except Exception as e:
+    print(f"[WARN] Errore nel calcolo PREZZO_SCONTATO: {e}")
+
+
         # Se non trovi nulla, produci comunque un file con header e nessuna riga
         out_io = io.StringIO()
         writer = csv.writer(out_io, dialect=dialect)
