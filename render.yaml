@@ -1,1 +1,30 @@
+services:
+  - type: cron
+    name: filter-listino-cron
+    env: python
+    schedule: "0 * * * *"   # ogni ora al minuto 0
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python filter_listino.py"
+    plan: starter
+    envVars:
+      - key: FTP_HOST
+        sync: false
+      - key: FTP_USER
+        sync: false
+      - key: FTP_PASS
+        sync: false
+      - key: FTP_PORT
+        value: "21"
+      - key: FTP_SECURE
+        value: "true"
+      - key: FTP_INPUT_PATH
+        value: "/public_html/IMPORT_DATI_FULL_20230919_0940/LISTINI.CSV"
+      - key: FTP_OUTPUT_DIR
+        value: "/public_html/IMPORT_DATI_FULL_20230919_0940"
+      - key: FILTER_MATCH
+        value: "LISTINO VENDITA 6"
+      - key: FILTER_MODE
+        value: "any"
+      - key: FILTER_COLUMN
+        value: ""
 
