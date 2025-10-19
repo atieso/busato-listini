@@ -17,10 +17,12 @@ FILTER_MATCH = os.getenv("FILTER_MATCH", "LISTINO VENDITA 6")
 FILTER_MODE = os.getenv("FILTER_MODE", "any")   # 'any' | 'column'
 FILTER_COLUMN = os.getenv("FILTER_COLUMN", "")
 OUTPUT_FILENAME = os.getenv("OUTPUT_FILENAME", "LISTINI_LISTINO_VENDITA_6.csv")
-OUTPUT_DECIMAL = (os.getenv("OUTPUT_DECIMAL") or "dot").strip().lower()  # 'dot' | 'comma'
 
 # Forza il delimitatore CSV (es. ';'). Se vuoto o 'auto', si tenta lo sniff.
 CSV_DELIMITER = (os.getenv("CSV_DELIMITER") or "auto").strip().lower()
+
+# Decimali in output: 'dot' (1.23) o 'comma' (1,23). Default: dot
+OUTPUT_DECIMAL = (os.getenv("OUTPUT_DECIMAL") or "dot").strip().lower()
 
 # =========================
 # FTP
@@ -89,7 +91,6 @@ def guess_csv(sample):
     """Ritorna (dialect, has_header). Se CSV_DELIMITER è impostato, lo usa."""
     text = sample.decode("utf-8", errors="replace")
     if CSV_DELIMITER and CSV_DELIMITER != "auto":
-        # forza il delimitatore scelto
         class Forced(csv.Dialect):
             delimiter = CSV_DELIMITER
             quotechar = '"'
@@ -98,16 +99,18 @@ def guess_csv(sample):
             skipinitialspace = False
             lineterminator = "\n"
             quoting = csv.QUOTE_MINIMAL
-        # header heuristic
-        has_header = csv.Sniffer().has_header(text[:4096])
+        # prova a capire se c'è header
+        try:
+            has_header = csv.Sniffer().has_header(text[:4096])
+        except Exception:
+            has_header = True
         print(f"[INFO] Delimitatore forzato: '{CSV_DELIMITER}'")
         return Forced(), has_header
 
-    # auto-sniff con preferenza europea (privilegia ';' se presente)
+    # auto-sniff con preferenza ';' se presente
     try:
         first_line = text.splitlines()[0] if text else ""
         if ";" in first_line and "," in first_line:
-            # se la prima riga contiene sia ';' che ',' (numeri), meglio ';'
             class Pref(csv.Dialect):
                 delimiter = ";"
                 quotechar = '"'
@@ -116,7 +119,10 @@ def guess_csv(sample):
                 skipinitialspace = False
                 lineterminator = "\n"
                 quoting = csv.QUOTE_MINIMAL
-            has_header = csv.Sniffer().has_header(text[:4096])
+            try:
+                has_header = csv.Sniffer().has_header(text[:4096])
+            except Exception:
+                has_header = True
             print("[INFO] Heuristica: preferito ';' come delimitatore.")
             return Pref(), has_header
 
@@ -151,7 +157,7 @@ def filter_rows(rows, headers):
     return filtered
 
 # =========================
-# NUMERIC PARSER (robusto)
+# Numeri
 # =========================
 def to_number(val):
     """
@@ -186,7 +192,6 @@ def to_number(val):
         return len(tail) in (3, 6, 9) and tail.isdigit()
 
     if has_comma and has_dot:
-        # decimale = separatore più a destra
         if s.rfind(",") > s.rfind("."):
             s = s.replace(".", "").replace(",", ".")  # EU
         else:
@@ -201,7 +206,7 @@ def to_number(val):
         tail = s.split(".")[-1]
         if is_thousands_tail(tail) and s.count(".") >= 1:
             s = s.replace(".", "")
-        # else: '.' già decimale
+        # else: '.' è decimale
 
     try:
         num = float(s)
@@ -210,6 +215,11 @@ def to_number(val):
         return num
     except ValueError:
         return None
+
+def fmt_decimal(num: float) -> str:
+    """Formatta il numero come stringa secondo OUTPUT_DECIMAL."""
+    s = f"{num:.2f}"
+    return s if OUTPUT_DECIMAL == "dot" else s.replace(".", ",")
 
 # =========================
 # PREZZO_SCONTATO
@@ -237,6 +247,7 @@ def add_prezzo_scontato(headers, rows):
         if len(r) <= max(idx_prezzo, idx_sconto):
             r.append("")
             continue
+
         prezzo = to_number(r[idx_prezzo])
         sconto = to_number(r[idx_sconto])
 
@@ -244,10 +255,7 @@ def add_prezzo_scontato(headers, rows):
             r.append("")
             continue
 
-        # Normalizza lo sconto:
-        # - vuoto/None → 0
-        # - se negativo, usa il valore assoluto (sconto sempre in sottrazione)
-        # - cap a 100 per sicurezza
+        # Normalizza sconto: None→0 ; negativo→abs ; cap a 100
         if sconto is None:
             sconto = 0.0
         else:
@@ -257,16 +265,10 @@ def add_prezzo_scontato(headers, rows):
 
         prezzo_scontato = prezzo * (1.0 - sconto / 100.0)
         r.append(fmt_decimal(prezzo_scontato))
-
         count += 1
 
     print(f"[INFO] PREZZO_SCONTATO calcolato su {count} righe.")
 
-
-def fmt_decimal(num: float) -> str:
-    s = f"{num:.2f}"
-    return s if OUTPUT_DECIMAL == "dot" else s.replace(".", ",")
-    
 # =========================
 # MAIN
 # =========================
@@ -294,11 +296,16 @@ def main():
     add_prezzo_scontato(headers, filtered)
 
     out_io = io.StringIO()
-    writer = csv.writer(out_io, dialect=dialect)
+    writer = csv.writer(
+        out_io,
+        delimiter=(dialect.delimiter if hasattr(dialect, "delimiter") else (";" if CSV_DELIMITER == "auto" else CSV_DELIMITER)),
+        quotechar='"',
+        quoting=csv.QUOTE_ALL,   # protezione anti-reinterpretazione
+        lineterminator="\n"
+    )
     writer.writerow(headers)
     writer.writerows(filtered)
     out_bytes = out_io.getvalue().encode("utf-8")
-    
 
     upload_bytes(ftp, input_dir, OUTPUT_FILENAME, out_bytes)
     print(f"[OK] File creato: {input_dir}/{OUTPUT_FILENAME}")
