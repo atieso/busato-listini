@@ -246,11 +246,16 @@ def add_prezzo_scontato(headers, rows):
             prezzo_scontato = prezzo
         else:
             prezzo_scontato = prezzo * (1 - sconto / 100.0)
-        r.append(f"{prezzo_scontato:.2f}".replace(".", ","))
+        r.append(fmt_decimal(prezzo_scontato))
         count += 1
 
     print(f"[INFO] PREZZO_SCONTATO calcolato su {count} righe.")
 
+
+def fmt_decimal(num: float) -> str:
+    s = f"{num:.2f}"
+    return s if OUTPUT_DECIMAL == "dot" else s.replace(".", ",")
+    
 # =========================
 # MAIN
 # =========================
@@ -282,6 +287,7 @@ def main():
     writer.writerow(headers)
     writer.writerows(filtered)
     out_bytes = out_io.getvalue().encode("utf-8")
+    
 
     upload_bytes(ftp, input_dir, OUTPUT_FILENAME, out_bytes)
     print(f"[OK] File creato: {input_dir}/{OUTPUT_FILENAME}")
