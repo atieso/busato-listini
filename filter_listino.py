@@ -4,21 +4,25 @@ import csv
 from ftplib import FTP, FTP_TLS, error_perm
 
 # =========================
-# Configurazione da variabili d'ambiente
+# ENV
 # =========================
 FTP_HOST = os.getenv("FTP_HOST")
 FTP_USER = os.getenv("FTP_USER")
 FTP_PASS = os.getenv("FTP_PASS")
 FTP_PORT = int(os.getenv("FTP_PORT", "21"))
 FTP_SECURE = os.getenv("FTP_SECURE", "true").lower() == "true"
-FTP_INPUT_PATH = os.getenv("FTP_INPUT_PATH")
+
+FTP_INPUT_PATH = os.getenv("FTP_INPUT_PATH")  # es: /public_html/.../LISTINI.CSV
 FILTER_MATCH = os.getenv("FILTER_MATCH", "LISTINO VENDITA 6")
-FILTER_MODE = os.getenv("FILTER_MODE", "any")
+FILTER_MODE = os.getenv("FILTER_MODE", "any")   # 'any' | 'column'
 FILTER_COLUMN = os.getenv("FILTER_COLUMN", "")
 OUTPUT_FILENAME = os.getenv("OUTPUT_FILENAME", "LISTINI_LISTINO_VENDITA_6.csv")
 
+# Forza il delimitatore CSV (es. ';'). Se vuoto o 'auto', si tenta lo sniff.
+CSV_DELIMITER = (os.getenv("CSV_DELIMITER") or "auto").strip().lower()
+
 # =========================
-# Connessione FTP
+# FTP
 # =========================
 def connect_ftp():
     if FTP_SECURE:
@@ -40,9 +44,6 @@ def connect_ftp():
     print("[INFO] Connesso via FTP.")
     return ftp
 
-# =========================
-# Utility FTP
-# =========================
 def split_dir_and_file(path):
     path = path.replace("\\", "/")
     parts = path.rsplit("/", 1)
@@ -81,23 +82,58 @@ def upload_bytes(ftp, remote_dir, filename, data):
     ftp.storbinary(f"STOR {filename}", io.BytesIO(data))
 
 # =========================
-# CSV helpers
+# CSV
 # =========================
 def guess_csv(sample):
+    """Ritorna (dialect, has_header). Se CSV_DELIMITER è impostato, lo usa."""
+    text = sample.decode("utf-8", errors="replace")
+    if CSV_DELIMITER and CSV_DELIMITER != "auto":
+        # forza il delimitatore scelto
+        class Forced(csv.Dialect):
+            delimiter = CSV_DELIMITER
+            quotechar = '"'
+            escapechar = None
+            doublequote = True
+            skipinitialspace = False
+            lineterminator = "\n"
+            quoting = csv.QUOTE_MINIMAL
+        # header heuristic
+        has_header = csv.Sniffer().has_header(text[:4096])
+        print(f"[INFO] Delimitatore forzato: '{CSV_DELIMITER}'")
+        return Forced(), has_header
+
+    # auto-sniff con preferenza europea (privilegia ';' se presente)
     try:
-        text = sample.decode("utf-8", errors="replace")
+        first_line = text.splitlines()[0] if text else ""
+        if ";" in first_line and "," in first_line:
+            # se la prima riga contiene sia ';' che ',' (numeri), meglio ';'
+            class Pref(csv.Dialect):
+                delimiter = ";"
+                quotechar = '"'
+                escapechar = None
+                doublequote = True
+                skipinitialspace = False
+                lineterminator = "\n"
+                quoting = csv.QUOTE_MINIMAL
+            has_header = csv.Sniffer().has_header(text[:4096])
+            print("[INFO] Heuristica: preferito ';' come delimitatore.")
+            return Pref(), has_header
+
         sniffer = csv.Sniffer()
         dialect = sniffer.sniff(text[:4096], delimiters=[",", ";", "\t", "|", ":"])
         has_header = sniffer.has_header(text[:4096])
+        print(f"[INFO] Delimitatore auto-rilevato: '{dialect.delimiter}'")
         return dialect, has_header
     except Exception:
         class Simple(csv.Dialect):
             delimiter = ";"
             quotechar = '"'
+            escapechar = None
             doublequote = True
             skipinitialspace = False
             lineterminator = "\n"
             quoting = csv.QUOTE_MINIMAL
+        print("[WARN] Sniffer fallito. Uso fallback ';'.")
         return Simple(), True
 
 def filter_rows(rows, headers):
@@ -114,14 +150,23 @@ def filter_rows(rows, headers):
     return filtered
 
 # =========================
-# Parser numerico robusto
+# NUMERIC PARSER (robusto)
 # =========================
 def to_number(val):
+    """
+    Converte stringhe monetarie in float, evitando x100.
+    Esempi:
+      '2,53000' -> 2.53
+      '2.530,00' -> 2530.00
+      '2,530' -> 2530
+      '2.530' -> 2530
+    """
     if val is None:
         return None
     s = str(val).strip()
     if not s:
         return None
+
     neg = False
     if s.startswith("(") and s.endswith(")"):
         neg = True
@@ -129,27 +174,34 @@ def to_number(val):
     if s.startswith("-"):
         neg = True
         s = s[1:].strip()
+
     for ch in ["€", " ", "\u00A0"]:
         s = s.replace(ch, "")
+
     has_comma = "," in s
     has_dot = "." in s
+
     def is_thousands_tail(tail):
         return len(tail) in (3, 6, 9) and tail.isdigit()
+
     if has_comma and has_dot:
+        # decimale = separatore più a destra
         if s.rfind(",") > s.rfind("."):
-            s = s.replace(".", "").replace(",", ".")
+            s = s.replace(".", "").replace(",", ".")  # EU
         else:
-            s = s.replace(",", "")
+            s = s.replace(",", "")                     # US
     elif has_comma:
         tail = s.split(",")[-1]
-        if is_thousands_tail(tail):
+        if is_thousands_tail(tail) and s.count(",") >= 1:
             s = s.replace(",", "")
         else:
             s = s.replace(",", ".")
     elif has_dot:
         tail = s.split(".")[-1]
-        if is_thousands_tail(tail):
+        if is_thousands_tail(tail) and s.count(".") >= 1:
             s = s.replace(".", "")
+        # else: '.' già decimale
+
     try:
         num = float(s)
         if neg:
@@ -159,7 +211,7 @@ def to_number(val):
         return None
 
 # =========================
-# Calcolo PREZZO_SCONTATO
+# PREZZO_SCONTATO
 # =========================
 def add_prezzo_scontato(headers, rows):
     def find_col(name):
@@ -168,13 +220,17 @@ def add_prezzo_scontato(headers, rows):
             if str(h).strip().lower() == name:
                 return i
         return None
+
     idx_prezzo = find_col("liprezzo")
     idx_sconto = find_col("liscont1")
+
     if idx_prezzo is None or idx_sconto is None:
-        print("[WARN] Colonne LIPREZZO/LISCONT1 non trovate.")
+        print("[WARN] Colonne LIPREZZO/LISCONT1 non trovate. Nessun calcolo.")
         return
-    if "PREZZO_SCONTATO" not in [h.strip().upper() for h in headers]:
+
+    if "PREZZO_SCONTATO" not in [str(h).strip() for h in headers]:
         headers.append("PREZZO_SCONTATO")
+
     count = 0
     for r in rows:
         if len(r) <= max(idx_prezzo, idx_sconto):
@@ -188,21 +244,24 @@ def add_prezzo_scontato(headers, rows):
         if sconto is None or sconto == 0:
             prezzo_scontato = prezzo
         else:
-            prezzo_scontato = prezzo * (1 - sconto / 100)
+            prezzo_scontato = prezzo * (1 - sconto / 100.0)
         r.append(f"{prezzo_scontato:.2f}".replace(".", ","))
         count += 1
+
     print(f"[INFO] PREZZO_SCONTATO calcolato su {count} righe.")
 
 # =========================
-# Main
+# MAIN
 # =========================
 def main():
     if not (FTP_HOST and FTP_USER and FTP_PASS and FTP_INPUT_PATH):
         print("[ERRORE] Manca una variabile d'ambiente obbligatoria.")
         return
+
     ftp = connect_ftp()
     raw, input_dir = download_file(ftp, FTP_INPUT_PATH)
     dialect, has_header = guess_csv(raw)
+
     text = raw.decode("utf-8", errors="replace")
     reader = csv.reader(io.StringIO(text), dialect=dialect)
     rows = list(reader)
@@ -210,17 +269,21 @@ def main():
         print("[ERRORE] File CSV vuoto.")
         ftp.quit()
         return
+
     headers = rows[0] if has_header else [f"col_{i+1}" for i in range(len(rows[0]))]
     body = rows[1:] if has_header else rows
+
     filtered = filter_rows(body, headers)
     add_prezzo_scontato(headers, filtered)
+
     out_io = io.StringIO()
     writer = csv.writer(out_io, dialect=dialect)
     writer.writerow(headers)
     writer.writerows(filtered)
     out_bytes = out_io.getvalue().encode("utf-8")
+
     upload_bytes(ftp, input_dir, OUTPUT_FILENAME, out_bytes)
-    print(f"[OK] File caricato in: {input_dir}/{OUTPUT_FILENAME}")
+    print(f"[OK] File creato: {input_dir}/{OUTPUT_FILENAME}")
     ftp.quit()
 
 if __name__ == "__main__":
