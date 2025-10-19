@@ -239,14 +239,25 @@ def add_prezzo_scontato(headers, rows):
             continue
         prezzo = to_number(r[idx_prezzo])
         sconto = to_number(r[idx_sconto])
+
         if prezzo is None:
             r.append("")
             continue
-        if sconto is None or sconto == 0:
-            prezzo_scontato = prezzo
+
+        # Normalizza lo sconto:
+        # - vuoto/None → 0
+        # - se negativo, usa il valore assoluto (sconto sempre in sottrazione)
+        # - cap a 100 per sicurezza
+        if sconto is None:
+            sconto = 0.0
         else:
-            prezzo_scontato = prezzo * (1 - sconto / 100.0)
+            sconto = abs(sconto)
+            if sconto > 100:
+                sconto = 100.0
+
+        prezzo_scontato = prezzo * (1.0 - sconto / 100.0)
         r.append(fmt_decimal(prezzo_scontato))
+
         count += 1
 
     print(f"[INFO] PREZZO_SCONTATO calcolato su {count} righe.")
