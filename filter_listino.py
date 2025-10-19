@@ -17,6 +17,7 @@ FILTER_MATCH = os.getenv("FILTER_MATCH", "LISTINO VENDITA 6")
 FILTER_MODE = os.getenv("FILTER_MODE", "any")   # 'any' | 'column'
 FILTER_COLUMN = os.getenv("FILTER_COLUMN", "")
 OUTPUT_FILENAME = os.getenv("OUTPUT_FILENAME", "LISTINI_LISTINO_VENDITA_6.csv")
+OUTPUT_DECIMAL = (os.getenv("OUTPUT_DECIMAL") or "dot").strip().lower()  # 'dot' | 'comma'
 
 # Forza il delimitatore CSV (es. ';'). Se vuoto o 'auto', si tenta lo sniff.
 CSV_DELIMITER = (os.getenv("CSV_DELIMITER") or "auto").strip().lower()
